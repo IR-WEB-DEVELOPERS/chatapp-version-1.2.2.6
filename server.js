@@ -44,13 +44,6 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// ── Static files — explicit, so the catch-all never intercepts assets ──
-app.use(express.static(path.join(__dirname), {
-    // Do NOT fall through to the SPA handler for real files
-    fallthrough: false,
-    // Suppress the default 404 so we can route SPA below
-}));
-
 // ── OTP store (backed by Firestore when available, in-memory fallback) ──
 // The in-memory Map is used as a write-through cache; Firestore is the
 // source of truth so OTPs survive server restarts / cold-starts.
@@ -328,6 +321,26 @@ app.get('/vapid-public-key', (req, res) => {
     if (!key) return res.status(503).json({ error: 'VAPID not configured' });
     res.json({ key });
 });
+
+// ── Cross-Origin-Opener-Policy — required for Firebase signInWithPopup ──
+// Without this the browser applies a restrictive default COOP that blocks
+// the auth popup from communicating back, producing the
+// "would block the window.closed / window.close call" console warnings
+// and occasionally causing the popup flow to stall.
+// "same-origin-allow-popups" lets the opener (login page) retain a
+// reference to popups it opened, which is exactly what the Firebase SDK needs.
+app.use((req, res, next) => {
+    const acceptsHtml = (req.headers.accept || '').includes('text/html');
+    if (acceptsHtml) {
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    }
+    next();
+});
+
+// ── Static files — placed AFTER all API routes so POST requests to
+//    /send-otp, /verify-otp, /send-push are never intercepted here.
+//    fallthrough:true (default) so missing files pass through to the SPA handler.
+app.use(express.static(path.join(__dirname)));
 
 // ── SPA catch-all — ONLY for navigation requests, not missing assets ──
 // This prevents /sw.js, /manifest.json, and module JS from returning chat.html.
