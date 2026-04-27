@@ -1,7 +1,21 @@
-// ── Firebase auth is initialised by the Firebase SDK scripts loaded in
-//    index.html before this file. Do NOT call firebase.initializeApp() here —
-//    globals.js (on chat.html) or the compat SDK handles that, and calling it
-//    twice causes "Firebase App named '[DEFAULT]' already exists" crashes.
+// ── Firebase Initialization (login page) ─────────────────────
+//    index.html loads the Firebase compat SDK scripts, but the compat SDK
+//    does NOT auto-initialize — initializeApp() must always be called
+//    explicitly before any firebase.auth() / firebase.firestore() usage.
+//    We guard with apps.length so a hot-reload never double-initializes.
+const _loginFirebaseConfig = {
+    apiKey: "AIzaSyBclTC8gK3QKi1X6Q-YCK2jT38yJ83xOcQ",
+    authDomain: "chat-app-a0f95.firebaseapp.com",
+    projectId: "chat-app-a0f95",
+    storageBucket: "chat-app-a0f95.appspot.com",
+    messagingSenderId: "754786153113",
+    appId: "1:754786153113:web:7543bfb097732ad229fe08",
+    measurementId: "G-JFKWR83KYJ"
+};
+
+if (!firebase.apps.length) {
+    firebase.initializeApp(_loginFirebaseConfig);
+}
 
 // auth.setPersistence is called once here for the login page context.
 const auth = firebase.auth();
