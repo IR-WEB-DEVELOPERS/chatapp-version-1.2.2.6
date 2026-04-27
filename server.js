@@ -204,13 +204,31 @@ try {
 }
 
 app.post('/send-push', async (req, res) => {
-    const { uid, title, body, icon, chatId, isGroup, type } = req.body;
+    const { uid, title, body, icon, chatId, isGroup, type, subscription } = req.body;
 
-    if (!uid || !db) {
-        return res.status(400).json({ error: 'Missing uid or db not ready' });
-    }
     if (!pushEnabled) {
         return res.status(503).json({ error: 'Web push is not configured' });
+    }
+
+    const payload = JSON.stringify({ title, body, icon, chatId, isGroup, type });
+
+    // Client నుండి subscription directly వస్తే Firestore read అక్కర్లేదు
+    if (subscription && subscription.endpoint) {
+        try {
+            await webpush.sendNotification(subscription, payload, { TTL: 86400 });
+            return res.json({ sent: 1 });
+        } catch (err) {
+            if (err.statusCode === 410 || err.statusCode === 404) {
+                return res.json({ sent: 0, message: 'Subscription expired' });
+            }
+            console.error('/send-push error:', err);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    // Fallback: Firestore నుండి చదువు
+    if (!uid || !db) {
+        return res.status(400).json({ error: 'Missing uid or subscription' });
     }
 
     try {
@@ -224,9 +242,6 @@ app.post('/send-push', async (req, res) => {
             return res.json({ sent: 0, message: 'No subscriptions for this user' });
         }
 
-        const payload = JSON.stringify({ title, body, icon, chatId, isGroup, type });
-        const options = { TTL: 86400 };
-
         let sent = 0;
         await Promise.allSettled(
             subsSnap.docs.map(async (subDoc) => {
@@ -235,7 +250,7 @@ app.post('/send-push', async (req, res) => {
                     await webpush.sendNotification(
                         { endpoint: sub.endpoint, keys: sub.keys },
                         payload,
-                        options
+                        { TTL: 86400 }
                     );
                     sent++;
                 } catch (err) {
