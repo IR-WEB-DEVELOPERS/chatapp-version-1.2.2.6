@@ -133,9 +133,13 @@ async function showPushNotification({ title, body, icon, chatId, isGroup, type }
     const clients    = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const foreground = clients.some(c => c.visibilityState === 'visible');
     const isCall     = type === 'call_video' || type === 'call_voice';
-    // FIX: Call notifications ని app foreground లో ఉన్నా show చేయాలి — in-app ring UI ఉన్నా OS notification కూడా కావాలి
-    // Regular messages: app visible అయితే in-app toast చాలు
-    if (foreground && !isCall) return;
+
+    // Tab visible గా ఉంటే OS notification వద్దు — కానీ in-app toast show చేయాలి
+    if (foreground && !isCall) {
+        // app కి relay చేయి — messaging.js లో IN_APP_NOTIFICATION handle చేస్తుంది
+        clients.forEach(c => c.postMessage({ type: 'IN_APP_NOTIFICATION', title, body, chatId, isGroup, notifType: type }));
+        return;
+    }
 
     // FIX: Call notifications కి special urgent style
 
