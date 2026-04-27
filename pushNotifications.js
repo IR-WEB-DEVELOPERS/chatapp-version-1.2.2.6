@@ -15,10 +15,21 @@
 //  Browser closed: ✅ YES (via Web Push)
 // ============================================================
 
-// VAPID public key — hardcoded (పాత version లాగా, server fetch అక్కర్లేదు)
-const VAPID_PUBLIC_KEY = 'BJy5wDtsS0uxRHvsCgimGwSR4WGGkEl1qKXCQGsTRhqKq8t8_1BbXfnHwvBWVQHIBTDrJmqNr1dHU-0HIyAmY3I';
+// VAPID public key is fetched from the server so it never needs to be
+// hardcoded here. Rotating the key only requires updating the env var.
+let VAPID_PUBLIC_KEY = null;
 async function getVapidPublicKey() {
-    return VAPID_PUBLIC_KEY;
+    if (VAPID_PUBLIC_KEY) return VAPID_PUBLIC_KEY;
+    try {
+        const res = await fetch('/vapid-public-key');
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        const data = await res.json();
+        VAPID_PUBLIC_KEY = data.key;
+        return VAPID_PUBLIC_KEY;
+    } catch (err) {
+        console.error('Failed to fetch VAPID public key from server:', err);
+        return null;
+    }
 }
 
 // ── Convert VAPID key from base64url to Uint8Array ───────────
@@ -179,19 +190,35 @@ async function sendPushNotification({ toUID, fromName, messageText, chatId, isGr
         }
 
         // 1. Call server /send-push → delivers to CLOSED browsers via Web Push
-        fetch('/send-push', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({
-                uid:     toUID,
-                title,
-                body,
-                icon:    '/icon-192.png',
-                chatId:  chatId  || null,
-                isGroup: isGroup || false,
-                type:    notifType
-            })
-        }).catch(() => {}); // fire and forget
+        // Receiver subscription Firestore నుండి client side చదివి pass చేస్తున్నాం
+        // — server Firestore read చేయకుండా quota save అవుతుంది
+        (async () => {
+            try {
+                let subscription = null;
+                if (db) {
+                    const subsSnap = await db.collection('users').doc(toUID)
+                        .collection('pushSubscriptions').get();
+                    if (!subsSnap.empty) {
+                        const sub = subsSnap.docs[0].data();
+                        subscription = { endpoint: sub.endpoint, keys: sub.keys };
+                    }
+                }
+                fetch('/send-push', {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({
+                        uid:     toUID,
+                        title,
+                        body,
+                        icon:    '/icon-192.png',
+                        chatId:  chatId  || null,
+                        isGroup: isGroup || false,
+                        type:    notifType,
+                        subscription
+                    })
+                }).catch(() => {});
+            } catch(e) {}
+        })();
 
         // 2. Write to Firestore — SW Firestore listener picks this up (browser open/minimised)
         await db.collection('notifications')
