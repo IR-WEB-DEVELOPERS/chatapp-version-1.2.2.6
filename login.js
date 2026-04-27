@@ -1,8 +1,4 @@
 // ── Firebase Initialization (login page) ─────────────────────
-//    index.html loads the Firebase compat SDK scripts, but the compat SDK
-//    does NOT auto-initialize — initializeApp() must always be called
-//    explicitly before any firebase.auth() / firebase.firestore() usage.
-//    We guard with apps.length so a hot-reload never double-initializes.
 const _loginFirebaseConfig = {
     apiKey: "AIzaSyBclTC8gK3QKi1X6Q-YCK2jT38yJ83xOcQ",
     authDomain: "chat-app-a0f95.firebaseapp.com",
@@ -17,21 +13,44 @@ if (!firebase.apps.length) {
     firebase.initializeApp(_loginFirebaseConfig);
 }
 
-// auth.setPersistence is called once here for the login page context.
 const auth = firebase.auth();
-auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch((err) => {
-    console.warn('Firebase auth persistence setup failed:', err);
-});
 
+// ── Loading overlay — hides the login card while Firebase checks for a
+//    persisted session. Removed as soon as we know there is no active user.
+//    Without this the login button flashes briefly on every browser open
+//    even when the user is already signed in and about to be redirected.
+(function injectLoadingOverlay() {
+    const el = document.createElement('div');
+    el.id = 'authCheckOverlay';
+    el.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:9999',
+        'background:var(--bg,#0f172a)',
+        'display:flex', 'align-items:center',
+        'justify-content:center', 'flex-direction:column', 'gap:16px'
+    ].join(';');
+    el.innerHTML = `
+        <div style="width:44px;height:44px;border:3px solid #6366f1;
+             border-top-color:transparent;border-radius:50%;
+             animation:_ld_spin 0.7s linear infinite;"></div>
+        <p style="color:#94a3b8;font-size:14px;margin:0;">Checking session…</p>
+        <style>@keyframes _ld_spin{to{transform:rotate(360deg)}}</style>
+    `;
+    document.body.appendChild(el);
+})();
 
+function hideLoadingOverlay() {
+    document.getElementById('authCheckOverlay')?.remove();
+}
+
+// ─────────────────────────────────────────────────────────────
 const LOGIN_VERIFIED_PREFIX = 'educhat_login_otp_verified_';
 
-let currentOtp = '';
+let currentOtp       = '';
 let currentOtpExpiry = 0;
-let resendTimer = null;
-let pendingUser = null;
-let otpSendInFlight = false;
-let lastOtpKey = '';
+let resendTimer      = null;
+let pendingUser      = null;
+let otpSendInFlight  = false;
+let lastOtpKey       = '';
 
 function markLoginVerified(uid) {
     localStorage.setItem(`${LOGIN_VERIFIED_PREFIX}${uid}`, 'true');
@@ -77,9 +96,9 @@ function ensureOtpModal() {
         modal.style.display = 'none';
         clearInterval(resendTimer);
         await auth.signOut();
-        pendingUser = null;
+        pendingUser     = null;
         otpSendInFlight = false;
-        lastOtpKey = '';
+        lastOtpKey      = '';
     });
     document.getElementById('verifyLoginOtp').addEventListener('click', verifyLoginOtp);
     document.getElementById('resendLoginOtp').addEventListener('click', () => sendLoginOtp(pendingUser));
@@ -100,10 +119,10 @@ async function sendLoginOtp(user) {
     const key = `${user.uid}:${user.email}`;
     if (otpSendInFlight || (lastOtpKey === key && existingModal?.style.display === 'flex')) return;
 
-    otpSendInFlight = true;
-    lastOtpKey = key;
-    pendingUser = user;
-    currentOtp = '';
+    otpSendInFlight  = true;
+    lastOtpKey       = key;
+    pendingUser      = user;
+    currentOtp       = '';
     currentOtpExpiry = 0;
 
     let response;
@@ -120,14 +139,14 @@ async function sendLoginOtp(user) {
 
     if (!response?.ok) {
         otpSendInFlight = false;
-        lastOtpKey = '';
+        lastOtpKey      = '';
         alert(response?.error || 'Failed to send OTP.');
         return;
     }
 
     const modal = ensureOtpModal();
     document.getElementById('loginOtpEmail').textContent = user.email;
-    document.getElementById('loginOtpInput').value = '';
+    document.getElementById('loginOtpInput').value       = '';
     document.getElementById('loginOtpError').textContent = '';
     modal.style.display = 'flex';
     document.getElementById('loginOtpInput').focus();
@@ -138,7 +157,7 @@ async function sendLoginOtp(user) {
 function startResendCountdown() {
     let seconds = 60;
     const resendBtn = document.getElementById('resendLoginOtp');
-    resendBtn.disabled = true;
+    resendBtn.disabled    = true;
     resendBtn.textContent = `Resend OTP (${seconds}s)`;
     clearInterval(resendTimer);
     resendTimer = setInterval(() => {
@@ -146,7 +165,7 @@ function startResendCountdown() {
         resendBtn.textContent = `Resend OTP (${seconds}s)`;
         if (seconds <= 0) {
             clearInterval(resendTimer);
-            resendBtn.disabled = false;
+            resendBtn.disabled    = false;
             resendBtn.textContent = 'Resend OTP';
         }
     }, 1000);
@@ -166,10 +185,10 @@ async function verifyLoginOtp() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                uid: pendingUser.uid,
-                email: pendingUser.email,
+                uid:     pendingUser.uid,
+                email:   pendingUser.email,
                 purpose: 'login',
-                code: input
+                code:    input
             })
         }).then(r => r.json());
         valid = !!result.ok;
@@ -191,7 +210,7 @@ async function verifyLoginOtp() {
 document.getElementById('googleLogin').onclick = async () => {
     try {
         const provider = new firebase.auth.GoogleAuthProvider();
-        const result = await auth.signInWithPopup(provider);
+        const result   = await auth.signInWithPopup(provider);
         await sendLoginOtp(result.user);
     } catch (error) {
         console.error('Login error:', error);
@@ -199,11 +218,39 @@ document.getElementById('googleLogin').onclick = async () => {
     }
 };
 
-auth.onAuthStateChanged(user => {
-    if (!user) return;
-    if (isLoginVerified(user.uid)) {
-        window.location.href = 'chat.html';
-        return;
-    }
-    sendLoginOtp(user);
-});
+// ── Bootstrap: setPersistence MUST complete before onAuthStateChanged is
+//    registered. If we register the listener first, Firebase may restore the
+//    session under the wrong persistence type (SESSION instead of LOCAL),
+//    meaning the session dies when the browser tab closes.
+//
+//    Flow on every page load:
+//      1. Overlay shown (login card hidden underneath).
+//      2. setPersistence(LOCAL) completes.
+//      3. onAuthStateChanged fires:
+//         a. user == null  → no session → remove overlay, show login card.
+//         b. user exists + isLoginVerified → redirect to chat.html silently.
+//         c. user exists but NOT verified → OTP not done yet (e.g. localStorage
+//            cleared) → show OTP modal on top of overlay.
+auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+    .catch(err => console.warn('Firebase persistence setup failed:', err))
+    .finally(() => {
+        auth.onAuthStateChanged(user => {
+            if (!user) {
+                // No active session — reveal the login card.
+                hideLoadingOverlay();
+                return;
+            }
+
+            if (isLoginVerified(user.uid)) {
+                // Active session + OTP already verified on this device →
+                // skip login entirely and go straight to the app.
+                window.location.href = 'chat.html';
+                return;
+            }
+
+            // Active Firebase session but localStorage flag missing
+            // (cleared storage, new device, etc.) — require OTP again.
+            hideLoadingOverlay();
+            sendLoginOtp(user);
+        });
+    });
