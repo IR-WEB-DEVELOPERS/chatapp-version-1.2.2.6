@@ -1,24 +1,5 @@
-// ── Firebase Initialization (login page) ─────────────────────
-const _loginFirebaseConfig = {
-    apiKey: "AIzaSyBclTC8gK3QKi1X6Q-YCK2jT38yJ83xOcQ",
-    authDomain: "chat-app-a0f95.firebaseapp.com",
-    projectId: "chat-app-a0f95",
-    storageBucket: "chat-app-a0f95.appspot.com",
-    messagingSenderId: "754786153113",
-    appId: "1:754786153113:web:7543bfb097732ad229fe08",
-    measurementId: "G-JFKWR83KYJ"
-};
-
-if (!firebase.apps.length) {
-    firebase.initializeApp(_loginFirebaseConfig);
-}
-
-const auth = firebase.auth();
-
-// ── Loading overlay — hides the login card while Firebase checks for a
-//    persisted session. Removed as soon as we know there is no active user.
-//    Without this the login button flashes briefly on every browser open
-//    even when the user is already signed in and about to be redirected.
+// ── Loading overlay — shown immediately so the login card never flashes
+//    while Firebase is checking for a persisted session.
 (function injectLoadingOverlay() {
     const el = document.createElement('div');
     el.id = 'authCheckOverlay';
@@ -40,6 +21,22 @@ const auth = firebase.auth();
 
 function hideLoadingOverlay() {
     document.getElementById('authCheckOverlay')?.remove();
+}
+
+// ── Firebase init — config comes from window.__ENV__ injected by server.js.
+//    No values are hardcoded here; change them only in .env on the server.
+const _firebaseConfig = {
+    apiKey:            window.__ENV__?.FIREBASE_API_KEY             || '',
+    authDomain:        window.__ENV__?.FIREBASE_AUTH_DOMAIN         || '',
+    projectId:         window.__ENV__?.FIREBASE_PROJECT_ID          || '',
+    storageBucket:     window.__ENV__?.FIREBASE_STORAGE_BUCKET      || '',
+    messagingSenderId: window.__ENV__?.FIREBASE_MESSAGING_SENDER_ID || '',
+    appId:             window.__ENV__?.FIREBASE_APP_ID              || '',
+    measurementId:     window.__ENV__?.FIREBASE_MEASUREMENT_ID      || '',
+};
+
+if (!firebase.apps.length) {
+    firebase.initializeApp(_firebaseConfig);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -95,7 +92,7 @@ function ensureOtpModal() {
     document.getElementById('closeLoginOtp').addEventListener('click', async () => {
         modal.style.display = 'none';
         clearInterval(resendTimer);
-        await auth.signOut();
+        await firebase.auth().signOut();
         pendingUser     = null;
         otpSendInFlight = false;
         lastOtpKey      = '';
@@ -112,7 +109,7 @@ function ensureOtpModal() {
 async function sendLoginOtp(user) {
     if (!user?.email) {
         alert('No email found for this account.');
-        await auth.signOut();
+        await firebase.auth().signOut();
         return;
     }
     const existingModal = document.getElementById('loginOtpModal');
@@ -210,7 +207,7 @@ async function verifyLoginOtp() {
 document.getElementById('googleLogin').onclick = async () => {
     try {
         const provider = new firebase.auth.GoogleAuthProvider();
-        const result   = await auth.signInWithPopup(provider);
+        const result   = await firebase.auth().signInWithPopup(provider);
         await sendLoginOtp(result.user);
     } catch (error) {
         console.error('Login error:', error);
@@ -218,38 +215,24 @@ document.getElementById('googleLogin').onclick = async () => {
     }
 };
 
-// ── Bootstrap: setPersistence MUST complete before onAuthStateChanged is
-//    registered. If we register the listener first, Firebase may restore the
-//    session under the wrong persistence type (SESSION instead of LOCAL),
-//    meaning the session dies when the browser tab closes.
-//
-//    Flow on every page load:
-//      1. Overlay shown (login card hidden underneath).
-//      2. setPersistence(LOCAL) completes.
-//      3. onAuthStateChanged fires:
-//         a. user == null  → no session → remove overlay, show login card.
-//         b. user exists + isLoginVerified → redirect to chat.html silently.
-//         c. user exists but NOT verified → OTP not done yet (e.g. localStorage
-//            cleared) → show OTP modal on top of overlay.
-auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+// ── Bootstrap: setPersistence(LOCAL) first, then watch auth state ─────────
+// setPersistence must complete before onAuthStateChanged is registered so
+// Firebase restores the session under the correct persistence type.
+firebase.auth()
+    .setPersistence(firebase.auth.Auth.Persistence.LOCAL)
     .catch(err => console.warn('Firebase persistence setup failed:', err))
     .finally(() => {
-        auth.onAuthStateChanged(user => {
+        firebase.auth().onAuthStateChanged(user => {
             if (!user) {
-                // No active session — reveal the login card.
                 hideLoadingOverlay();
                 return;
             }
-
             if (isLoginVerified(user.uid)) {
-                // Active session + OTP already verified on this device →
-                // skip login entirely and go straight to the app.
+                // Session active + OTP already done → straight to app.
                 window.location.href = 'chat.html';
                 return;
             }
-
-            // Active Firebase session but localStorage flag missing
-            // (cleared storage, new device, etc.) — require OTP again.
+            // Session exists but OTP flag missing (cleared storage, new device).
             hideLoadingOverlay();
             sendLoginOtp(user);
         });
