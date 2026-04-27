@@ -321,34 +321,80 @@ app.get('/vapid-public-key', (req, res) => {
     if (!key) return res.status(503).json({ error: 'VAPID not configured' });
     res.json({ key });
 });
+// ── Firebase client config endpoint ──────────────────────────
+// Serves only the browser-safe Firebase config (no service account secrets).
+// Both login.js (index.html) and globals.js (chat.html) fetch this so that
+// the config lives exclusively in .env and never gets hardcoded in source.
+app.get('/firebase-config', (req, res) => {
+    const {
+        FIREBASE_API_KEY,
+        FIREBASE_AUTH_DOMAIN,
+        FIREBASE_PROJECT_ID,
+        FIREBASE_STORAGE_BUCKET,
+        FIREBASE_MESSAGING_SENDER_ID,
+        FIREBASE_APP_ID,
+        FIREBASE_MEASUREMENT_ID,
+    } = process.env;
 
-// ── Cross-Origin-Opener-Policy — required for Firebase signInWithPopup ──
-// Without this the browser applies a restrictive default COOP that blocks
-// the auth popup from communicating back, producing the
-// "would block the window.closed / window.close call" console warnings
-// and occasionally causing the popup flow to stall.
-// "same-origin-allow-popups" lets the opener (login page) retain a
-// reference to popups it opened, which is exactly what the Firebase SDK needs.
-app.use((req, res, next) => {
-    const acceptsHtml = (req.headers.accept || '').includes('text/html');
-    if (acceptsHtml) {
-        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    if (!FIREBASE_API_KEY || !FIREBASE_APP_ID) {
+        return res.status(503).json({ error: 'Firebase client config not set in environment' });
     }
-    next();
+
+    res.json({
+        apiKey:            FIREBASE_API_KEY,
+        authDomain:        FIREBASE_AUTH_DOMAIN,
+        projectId:         FIREBASE_PROJECT_ID,
+        storageBucket:     FIREBASE_STORAGE_BUCKET,
+        messagingSenderId: FIREBASE_MESSAGING_SENDER_ID,
+        appId:             FIREBASE_APP_ID,
+        measurementId:     FIREBASE_MEASUREMENT_ID,
+    });
 });
 
-// ── Static files — placed AFTER all API routes so POST requests to
-//    /send-otp, /verify-otp, /send-push are never intercepted here.
-//    fallthrough:true (default) so missing files pass through to the SPA handler.
+
+// ── Build the browser-safe env snippet injected into every HTML page ──
+// window.__ENV__ is read by globals.js and login.js instead of hardcoding
+// Firebase config in source. Only non-secret, client-safe values go here.
+function buildEnvScript() {
+    return `<script>window.__ENV__=${JSON.stringify({
+        FIREBASE_API_KEY:            process.env.FIREBASE_API_KEY            || '',
+        FIREBASE_AUTH_DOMAIN:        process.env.FIREBASE_AUTH_DOMAIN        || '',
+        FIREBASE_PROJECT_ID:         process.env.FIREBASE_PROJECT_ID         || '',
+        FIREBASE_STORAGE_BUCKET:     process.env.FIREBASE_STORAGE_BUCKET     || '',
+        FIREBASE_MESSAGING_SENDER_ID:process.env.FIREBASE_MESSAGING_SENDER_ID|| '',
+        FIREBASE_APP_ID:             process.env.FIREBASE_APP_ID             || '',
+        FIREBASE_MEASUREMENT_ID:     process.env.FIREBASE_MEASUREMENT_ID     || '',
+    })};</script>`;
+}
+
+// ── Helper: read an HTML file and inject __ENV__ before </head> ──────────
+const fs = require('fs');
+function serveInjectedHtml(res, filename) {
+    const filepath = path.join(__dirname, filename);
+    let html;
+    try {
+        html = fs.readFileSync(filepath, 'utf8');
+    } catch (e) {
+        return res.status(404).send('Not found');
+    }
+    const injected = html.replace('</head>', buildEnvScript() + '\n</head>');
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    res.send(injected);
+}
+
+// ── Dedicated routes for HTML pages — inject __ENV__ into each ──────────
+app.get(['/', '/index.html'], (req, res) => serveInjectedHtml(res, 'index.html'));
+app.get('/chat.html',         (req, res) => serveInjectedHtml(res, 'chat.html'));
+
+// ── Static files — placed AFTER all API + HTML routes ───────────────────
 app.use(express.static(path.join(__dirname)));
 
-// ── SPA catch-all — ONLY for navigation requests, not missing assets ──
-// This prevents /sw.js, /manifest.json, and module JS from returning chat.html.
+// ── SPA catch-all — remaining navigation requests get chat.html ─────────
 app.use((req, res, next) => {
-    // Only handle GET requests that look like page navigations (Accept: text/html)
     const acceptsHtml = (req.headers.accept || '').includes('text/html');
     if (req.method === 'GET' && acceptsHtml) {
-        return res.sendFile(path.join(__dirname, 'chat.html'));
+        return serveInjectedHtml(res, 'chat.html');
     }
     next();
 });
