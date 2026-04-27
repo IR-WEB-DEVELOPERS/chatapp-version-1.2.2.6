@@ -3,14 +3,16 @@
 // ============================================================
 
 // ── Firebase Initialization ──────────────────────────────────
+// Config is injected by the server into window.__ENV__ (see server.js
+// buildEnvScript) so no values are ever hardcoded in source files.
 const firebaseConfig = {
-    apiKey: "AIzaSyBclTC8gK3QKi1X6Q-YCK2jT38yJ83xOcQ",
-    authDomain: "chat-app-a0f95.firebaseapp.com",
-    projectId: "chat-app-a0f95",
-    storageBucket: "chat-app-a0f95.appspot.com",
-    messagingSenderId: "754786153113",
-    appId: "1:754786153113:web:7543bfb097732ad229fe08",
-    measurementId: "G-JFKWR83KYJ"
+    apiKey:            window.__ENV__?.FIREBASE_API_KEY             || '',
+    authDomain:        window.__ENV__?.FIREBASE_AUTH_DOMAIN         || '',
+    projectId:         window.__ENV__?.FIREBASE_PROJECT_ID          || '',
+    storageBucket:     window.__ENV__?.FIREBASE_STORAGE_BUCKET      || '',
+    messagingSenderId: window.__ENV__?.FIREBASE_MESSAGING_SENDER_ID || '',
+    appId:             window.__ENV__?.FIREBASE_APP_ID              || '',
+    measurementId:     window.__ENV__?.FIREBASE_MEASUREMENT_ID      || '',
 };
 // Expose as a single source of truth for other scripts (e.g. pushNotifications.js)
 window._firebaseConfig = firebaseConfig;
