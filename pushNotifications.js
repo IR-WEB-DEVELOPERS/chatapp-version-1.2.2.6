@@ -113,7 +113,20 @@ async function initPushNotifications() {
 
 // ── Handle messages from Service Worker ─────────────────────
 function handleSWMessage(event) {
-    const { type, chatId, isGroup, callType, callId } = event.data || {};
+    const { type, chatId, isGroup, callType, callId, notifType } = event.data || {};
+
+    // SW నుండి in-app toast trigger — tab visible, message వేరే user నుండి
+    if (type === 'IN_APP_NOTIFICATION') {
+        const { title, body } = event.data;
+        // current open chat కాదు అయితే toast చూపించు
+        // chatWithUID/groupChatID module-scoped కాబట్టి URL hash/param check చేద్దాం
+        // లేదా always show — app లో duplicate toast లేకుండా messaging.js handle చేస్తుంది
+        const isCurrentChat = false; // always show toast — user open chat లో ఉంటే new messages visible anyway
+        if (!isCurrentChat) {
+            showInAppToast({ title, body, chatId, isGroup });
+        }
+        return;
+    }
 
     if (type === 'NOTIFICATION_CLICKED') {
         if (callType === 'call_video' || callType === 'call_voice') {
@@ -204,6 +217,20 @@ async function sendPushNotification({ toUID, fromName, messageText, chatId, isGr
             })
         }).catch(() => {}); // fire and forget
 
+        // 1b. PATH B — SW postMessage: tab open/minimised అయినప్పుడు SW notify చేయాలి
+        // (SW లో 'message' listener SHOW_NOTIFICATION handle చేస్తుంది)
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+                type:    'SHOW_NOTIFICATION',
+                title,
+                body,
+                icon:    '/icon-192.png',
+                chatId:  chatId  || null,
+                isGroup: isGroup || false,
+                type:    notifType   // overrides above, same value
+            });
+        }
+
         // 2. Write to Firestore — SW Firestore listener picks this up (browser open/minimised)
         await db.collection('notifications')
             .doc(toUID)
@@ -238,6 +265,52 @@ async function notifyIncomingCall({ toUID, fromName, isVideo, callId }) {
         chatId: callId || null,  // FIX: callId ని chatId గా pass చేయాలి — SW notification data లో ఉంటుంది
         type: isVideo ? 'call_video' : 'call_voice'
     });
+}
+
+// ── In-app toast notification (tab visible గా ఉన్నప్పుడు) ──────
+function showInAppToast({ title, body, chatId, isGroup }) {
+    // Already existing toast అయితే remove చేయి
+    const old = document.getElementById('push-toast');
+    if (old) old.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'push-toast';
+    toast.style.cssText = [
+        'position:fixed', 'top:16px', 'right:16px', 'z-index:99999',
+        'background:#1e1e2e', 'color:#fff', 'border-radius:12px',
+        'padding:12px 16px', 'max-width:300px', 'cursor:pointer',
+        'box-shadow:0 4px 20px rgba(0,0,0,0.4)',
+        'display:flex', 'gap:10px', 'align-items:flex-start',
+        'animation:slideInToast 0.3s ease',
+        'font-family:inherit'
+    ].join(';');
+
+    toast.innerHTML = `
+        <img src="/icon-192.png" style="width:36px;height:36px;border-radius:50%;flex-shrink:0">
+        <div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:2px">${title || 'New Message'}</div>
+          <div style="font-size:12px;opacity:0.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px">${body || ''}</div>
+        </div>`;
+
+    // CSS animation inject (once)
+    if (!document.getElementById('push-toast-style')) {
+        const s = document.createElement('style');
+        s.id = 'push-toast-style';
+        s.textContent = `@keyframes slideInToast{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}`;
+        document.head.appendChild(s);
+    }
+
+    toast.addEventListener('click', () => {
+        toast.remove();
+        if (chatId) {
+            if (isGroup && window.openGroupChat) window.openGroupChat(chatId);
+            else if (window.openChat) window.openChat(chatId);
+            else if (window.openChatById) window.openChatById(chatId, isGroup);
+        }
+    });
+
+    document.body.appendChild(toast);
+    setTimeout(() => toast?.remove(), 5000);
 }
 
 // ── Expose globally ──────────────────────────────────────────
