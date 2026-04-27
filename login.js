@@ -1,209 +1,363 @@
-// ── Firebase Initialization (login page) ─────────────────────
-//    index.html loads the Firebase compat SDK scripts, but the compat SDK
-//    does NOT auto-initialize — initializeApp() must always be called
-//    explicitly before any firebase.auth() / firebase.firestore() usage.
-//    We guard with apps.length so a hot-reload never double-initializes.
-const _loginFirebaseConfig = {
-    apiKey: "AIzaSyBclTC8gK3QKi1X6Q-YCK2jT38yJ83xOcQ",
-    authDomain: "chat-app-a0f95.firebaseapp.com",
-    projectId: "chat-app-a0f95",
-    storageBucket: "chat-app-a0f95.appspot.com",
-    messagingSenderId: "754786153113",
-    appId: "1:754786153113:web:7543bfb097732ad229fe08",
-    measurementId: "G-JFKWR83KYJ"
-};
+// ============================================================
+//  server.js - Render deployment server
+//  Serves static files + Web Push + OTP email endpoints
+// ============================================================
 
-if (!firebase.apps.length) {
-    firebase.initializeApp(_loginFirebaseConfig);
+try {
+    require('dotenv').config();
+} catch (err) {
+    // Render and other hosts inject env vars directly; dotenv is only for local runs.
 }
 
-// auth.setPersistence is called once here for the login page context.
-const auth = firebase.auth();
-auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch((err) => {
-    console.warn('Firebase auth persistence setup failed:', err);
+const express = require('express');
+const webpush = require('web-push');
+const admin = require('firebase-admin');
+const path = require('path');
+const crypto = require('crypto');
+
+let nodemailer = null;
+try {
+    nodemailer = require('nodemailer');
+} catch (err) {
+    console.warn('Nodemailer not installed yet. Run: npm install');
+}
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// ── CORS middleware ──────────────────────────────────────────
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
+        if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
 });
 
+app.use(express.json());
 
-const LOGIN_VERIFIED_PREFIX = 'educhat_login_otp_verified_';
+// ── OTP store (backed by Firestore when available, in-memory fallback) ──
+// The in-memory Map is used as a write-through cache; Firestore is the
+// source of truth so OTPs survive server restarts / cold-starts.
+const otpMemCache = new Map();
 
-let currentOtp = '';
-let currentOtpExpiry = 0;
-let resendTimer = null;
-let pendingUser = null;
-let otpSendInFlight = false;
-let lastOtpKey = '';
-
-function markLoginVerified(uid) {
-    localStorage.setItem(`${LOGIN_VERIFIED_PREFIX}${uid}`, 'true');
-    localStorage.setItem('educhat_last_verified_uid', uid);
-}
-
-function isLoginVerified(uid) {
-    return localStorage.getItem(`${LOGIN_VERIFIED_PREFIX}${uid}`) === 'true';
-}
-
-function generateOtp() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-function ensureOtpModal() {
-    let modal = document.getElementById('loginOtpModal');
-    if (modal) return modal;
-
-    modal = document.createElement('div');
-    modal.id = 'loginOtpModal';
-    modal.className = 'login-otp-overlay';
-    modal.innerHTML = `
-        <div class="login-otp-card">
-            <div class="login-otp-header">
-                <div>
-                    <h3>Email OTP Verification</h3>
-                    <p>Enter the 6-digit OTP sent to your email.</p>
-                </div>
-                <button id="closeLoginOtp" class="login-otp-close" type="button">&times;</button>
-            </div>
-            <div class="login-otp-body">
-                <div class="login-otp-email" id="loginOtpEmail"></div>
-                <input id="loginOtpInput" class="login-otp-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000">
-                <div id="loginOtpError" class="login-otp-error"></div>
-                <button id="verifyLoginOtp" class="login-otp-primary" type="button">Verify OTP</button>
-                <button id="resendLoginOtp" class="login-otp-secondary" type="button">Resend OTP</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-
-    document.getElementById('closeLoginOtp').addEventListener('click', async () => {
-        modal.style.display = 'none';
-        clearInterval(resendTimer);
-        await auth.signOut();
-        pendingUser = null;
-        otpSendInFlight = false;
-        lastOtpKey = '';
-    });
-    document.getElementById('verifyLoginOtp').addEventListener('click', verifyLoginOtp);
-    document.getElementById('resendLoginOtp').addEventListener('click', () => sendLoginOtp(pendingUser));
-    document.getElementById('loginOtpInput').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') verifyLoginOtp();
-    });
-
-    return modal;
-}
-
-async function sendLoginOtp(user) {
-    if (!user?.email) {
-        alert('No email found for this account.');
-        await auth.signOut();
-        return;
+async function otpStoreSet(key, value, db) {
+    otpMemCache.set(key, value);
+    if (db) {
+        try {
+            await db.collection('_otpStore').doc(key.replace(/[^a-zA-Z0-9_-]/g, '_')).set(value);
+        } catch (e) { console.warn('OTP Firestore write failed:', e.message); }
     }
-    const existingModal = document.getElementById('loginOtpModal');
-    const key = `${user.uid}:${user.email}`;
-    if (otpSendInFlight || (lastOtpKey === key && existingModal?.style.display === 'flex')) return;
-
-    otpSendInFlight = true;
-    lastOtpKey = key;
-    pendingUser = user;
-    currentOtp = '';
-    currentOtpExpiry = 0;
-
-    let response;
-    try {
-        response = await fetch('/send-otp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid: user.uid, email: user.email, purpose: 'login' })
-        }).then(r => r.json());
-    } catch (err) {
-        console.error('Backend OTP send failed:', err);
-        response = { ok: false, error: 'Failed to send OTP. Check SMTP settings.' };
-    }
-
-    if (!response?.ok) {
-        otpSendInFlight = false;
-        lastOtpKey = '';
-        alert(response?.error || 'Failed to send OTP.');
-        return;
-    }
-
-    const modal = ensureOtpModal();
-    document.getElementById('loginOtpEmail').textContent = user.email;
-    document.getElementById('loginOtpInput').value = '';
-    document.getElementById('loginOtpError').textContent = '';
-    modal.style.display = 'flex';
-    document.getElementById('loginOtpInput').focus();
-    startResendCountdown();
-    otpSendInFlight = false;
 }
 
-function startResendCountdown() {
-    let seconds = 60;
-    const resendBtn = document.getElementById('resendLoginOtp');
-    resendBtn.disabled = true;
-    resendBtn.textContent = `Resend OTP (${seconds}s)`;
-    clearInterval(resendTimer);
-    resendTimer = setInterval(() => {
-        seconds--;
-        resendBtn.textContent = `Resend OTP (${seconds}s)`;
-        if (seconds <= 0) {
-            clearInterval(resendTimer);
-            resendBtn.disabled = false;
-            resendBtn.textContent = 'Resend OTP';
+async function otpStoreGet(key, db) {
+    if (otpMemCache.has(key)) return otpMemCache.get(key);
+    if (db) {
+        try {
+            const snap = await db.collection('_otpStore').doc(key.replace(/[^a-zA-Z0-9_-]/g, '_')).get();
+            if (snap.exists) {
+                const val = snap.data();
+                otpMemCache.set(key, val);
+                return val;
+            }
+        } catch (e) { console.warn('OTP Firestore read failed:', e.message); }
+    }
+    return null;
+}
+
+async function otpStoreDelete(key, db) {
+    otpMemCache.delete(key);
+    if (db) {
+        try {
+            await db.collection('_otpStore').doc(key.replace(/[^a-zA-Z0-9_-]/g, '_')).delete();
+        } catch (e) { console.warn('OTP Firestore delete failed:', e.message); }
+    }
+}
+
+// ── Rate limiting for /send-otp ──────────────────────────────
+// Tracks per-IP and per-email send counts with a rolling 1-hour window
+const otpRateLimit = new Map(); // key -> { count, windowStart }
+const OTP_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const OTP_MAX_PER_IP = 10;
+const OTP_MAX_PER_EMAIL = 5;
+
+function checkOtpRateLimit(ip, email) {
+    const now = Date.now();
+    for (const key of [`ip:${ip}`, `email:${email}`]) {
+        const limit = key.startsWith('ip:') ? OTP_MAX_PER_IP : OTP_MAX_PER_EMAIL;
+        let entry = otpRateLimit.get(key);
+        if (!entry || now - entry.windowStart > OTP_RATE_WINDOW_MS) {
+            entry = { count: 0, windowStart: now };
         }
-    }, 1000);
+        if (entry.count >= limit) return false;
+        entry.count++;
+        otpRateLimit.set(key, entry);
+    }
+    return true;
 }
 
-async function verifyLoginOtp() {
-    const input = (document.getElementById('loginOtpInput')?.value || '').trim();
-    const error = document.getElementById('loginOtpError');
-    if (!/^\d{6}$/.test(input)) {
-        error.textContent = 'Enter a valid 6-digit OTP.';
-        return;
+function loadServiceAccount() {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim();
+        const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
+        const parsed = JSON.parse(json);
+        if (parsed.private_key) parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+        return parsed;
     }
 
-    let valid = input === currentOtp && Date.now() < currentOtpExpiry;
+    if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+        return {
+            type: 'service_account',
+            project_id: process.env.FIREBASE_PROJECT_ID,
+            private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+            private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            client_email: process.env.FIREBASE_CLIENT_EMAIL,
+            client_id: process.env.FIREBASE_CLIENT_ID,
+            auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+            token_uri: 'https://oauth2.googleapis.com/token',
+            auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
+            client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL
+        };
+    }
+
+    return null;
+}
+
+function configureWebPush() {
+    const publicKey = process.env.VAPID_PUBLIC_KEY;
+    const privateKey = process.env.VAPID_PRIVATE_KEY;
+    const email = process.env.VAPID_EMAIL || 'mailto:admin@educhat.app';
+
+    if (!publicKey || !privateKey) {
+        console.warn('VAPID keys are not configured. Web push sending will be disabled.');
+        return false;
+    }
+
+    webpush.setVapidDetails(email, publicKey, privateKey);
+    return true;
+}
+
+function getMailer() {
+    if (!nodemailer) return null;
+    if (process.env.SMTP_URL) {
+        return nodemailer.createTransport(process.env.SMTP_URL);
+    }
+    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+        return null;
+    }
+    return nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || Number(process.env.SMTP_PORT) === 465,
+        auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS
+        }
+    });
+}
+
+async function sendOtpEmail({ to, code, purpose }) {
+    const mailer = getMailer();
+    if (!mailer) return { sent: false, reason: 'SMTP_NOT_CONFIGURED' };
+
+    const label = purpose === 'privacy-reset' ? 'private chats' : 'login';
+    await mailer.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to,
+        subject: `EduChat ${label} OTP`,
+        text: `Your EduChat ${label} OTP is ${code}. It expires in 10 minutes.`,
+        html: `<p>Your EduChat ${label} OTP is <strong>${code}</strong>.</p><p>It expires in 10 minutes.</p>`
+    });
+    return { sent: true };
+}
+
+function getOtpKey({ uid, email, purpose }) {
+    return `${purpose || 'login'}:${uid || email}`;
+}
+
+function generateOTP() {
+    return crypto.randomInt(100000, 1000000).toString();
+}
+
+const pushEnabled = configureWebPush();
+const serviceAccount = loadServiceAccount();
+
+let db = null;
+try {
+    if (serviceAccount) {
+        admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    } else {
+        admin.initializeApp();
+    }
+    db = admin.firestore();
+    console.log('Firebase Admin initialized');
+} catch (err) {
+    console.error('Firebase Admin init error:', err.message);
+}
+
+app.post('/send-push', async (req, res) => {
+    const { uid, title, body, icon, chatId, isGroup, type } = req.body;
+
+    if (!uid || !db) {
+        return res.status(400).json({ error: 'Missing uid or db not ready' });
+    }
+    if (!pushEnabled) {
+        return res.status(503).json({ error: 'Web push is not configured' });
+    }
+
     try {
-        const result = await fetch('/verify-otp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                uid: pendingUser.uid,
-                email: pendingUser.email,
-                purpose: 'login',
-                code: input
+        const subsSnap = await db
+            .collection('users')
+            .doc(uid)
+            .collection('pushSubscriptions')
+            .get();
+
+        if (subsSnap.empty) {
+            return res.json({ sent: 0, message: 'No subscriptions for this user' });
+        }
+
+        const payload = JSON.stringify({ title, body, icon, chatId, isGroup, type });
+        const options = { TTL: 86400 };
+
+        let sent = 0;
+        await Promise.allSettled(
+            subsSnap.docs.map(async (subDoc) => {
+                const sub = subDoc.data();
+                try {
+                    await webpush.sendNotification(
+                        { endpoint: sub.endpoint, keys: sub.keys },
+                        payload,
+                        options
+                    );
+                    sent++;
+                } catch (err) {
+                    if (err.statusCode === 410 || err.statusCode === 404) {
+                        await subDoc.ref.delete();
+                    }
+                }
             })
-        }).then(r => r.json());
-        valid = !!result.ok;
-        if (!valid && result.error) error.textContent = result.error;
+        );
+
+        res.json({ sent, total: subsSnap.size });
     } catch (err) {
-        console.warn('Backend OTP verify failed, using browser fallback OTP:', err);
+        console.error('/send-push error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/send-otp', async (req, res) => {
+    const { uid, email, purpose = 'login' } = req.body || {};
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ ok: false, error: 'Valid email is required' });
     }
 
-    if (!valid) {
-        if (!error.textContent) error.textContent = 'Invalid or expired OTP.';
-        return;
+    // Rate limiting — block abuse before touching SMTP quota
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    if (!checkOtpRateLimit(ip, email)) {
+        return res.status(429).json({ ok: false, error: 'Too many OTP requests. Please wait before trying again.' });
     }
 
-    clearInterval(resendTimer);
-    markLoginVerified(pendingUser.uid);
-    window.location.href = 'chat.html';
-}
+    const code = generateOTP();
+    const expiresAt = Date.now() + 10 * 60 * 1000;
+    const key = getOtpKey({ uid, email, purpose });
+    await otpStoreSet(key, { code, expiresAt, email, purpose, attempts: 0 }, db);
 
-document.getElementById('googleLogin').onclick = async () => {
     try {
-        const provider = new firebase.auth.GoogleAuthProvider();
-        const result = await auth.signInWithPopup(provider);
-        await sendLoginOtp(result.user);
-    } catch (error) {
-        console.error('Login error:', error);
-        alert('Login failed. Please try again.');
+        const delivery = await sendOtpEmail({ to: email, code, purpose });
+        console.log(`[OTP] ${purpose} for ${email}: ${delivery.sent ? 'emailed' : delivery.reason}`);
+        if (!delivery.sent) {
+            await otpStoreDelete(key, db);
+            return res.status(503).json({ ok: false, error: 'SMTP is not configured' });
+        }
+        res.json({ ok: true, sent: true, message: 'OTP sent to email' });
+    } catch (err) {
+        await otpStoreDelete(key, db);
+        console.error('/send-otp error:', err);
+        res.status(500).json({ ok: false, error: 'Email failed' });
     }
-};
+});
 
-auth.onAuthStateChanged(user => {
-    if (!user) return;
-    if (isLoginVerified(user.uid)) {
-        window.location.href = 'chat.html';
-        return;
+app.post('/verify-otp', async (req, res) => {
+    const { uid, email, purpose = 'login', code } = req.body || {};
+    const key = getOtpKey({ uid, email, purpose });
+    const entry = await otpStoreGet(key, db);
+
+    if (!entry) {
+        return res.status(400).json({ ok: false, error: 'OTP not found or expired' });
     }
-    sendLoginOtp(user);
+    if (Date.now() > entry.expiresAt) {
+        await otpStoreDelete(key, db);
+        return res.status(400).json({ ok: false, error: 'OTP expired' });
+    }
+    entry.attempts = (entry.attempts || 0) + 1;
+    if (entry.attempts > 5) {
+        await otpStoreDelete(key, db);
+        return res.status(429).json({ ok: false, error: 'Too many attempts' });
+    }
+    // Update attempt count in store
+    await otpStoreSet(key, entry, db);
+
+    if (entry.code !== String(code || '').trim()) {
+        return res.status(400).json({ ok: false, error: 'Invalid OTP' });
+    }
+
+    await otpStoreDelete(key, db);
+    res.json({ ok: true });
+});
+
+app.get('/health', (_, res) => res.json({ status: 'ok' }));
+
+// ── VAPID public key endpoint — clients read this instead of hardcoding ──
+app.get('/vapid-public-key', (req, res) => {
+    const key = process.env.VAPID_PUBLIC_KEY;
+    if (!key) return res.status(503).json({ error: 'VAPID not configured' });
+    res.json({ key });
+});
+
+// ── Cross-Origin-Opener-Policy — required for Firebase signInWithPopup ──
+// Without this the browser applies a restrictive default COOP that blocks
+// the auth popup from communicating back, producing the
+// "would block the window.closed / window.close call" console warnings
+// and occasionally causing the popup flow to stall.
+// "same-origin-allow-popups" lets the opener (login page) retain a
+// reference to popups it opened, which is exactly what the Firebase SDK needs.
+app.use((req, res, next) => {
+    const acceptsHtml = (req.headers.accept || '').includes('text/html');
+    if (acceptsHtml) {
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    }
+    next();
+});
+
+// ── Static files — placed AFTER all API routes so POST requests to
+//    /send-otp, /verify-otp, /send-push are never intercepted here.
+//    fallthrough:true (default) so missing files pass through to the SPA handler.
+app.use(express.static(path.join(__dirname)));
+
+// ── SPA catch-all — ONLY for navigation requests, not missing assets ──
+// This prevents /sw.js, /manifest.json, and module JS from returning chat.html.
+app.use((req, res, next) => {
+    // Only handle GET requests that look like page navigations (Accept: text/html)
+    const acceptsHtml = (req.headers.accept || '').includes('text/html');
+    if (req.method === 'GET' && acceptsHtml) {
+        return res.sendFile(path.join(__dirname, 'chat.html'));
+    }
+    next();
+});
+
+// ── Final 404 for anything else (missing JS/CSS/JSON assets) ──
+app.use((req, res) => {
+    res.status(404).json({ error: 'Not found' });
+});
+
+app.listen(PORT, () => {
+    console.log(`EduChat server running on port ${PORT}`);
 });
