@@ -189,52 +189,32 @@ async function sendPushNotification({ toUID, fromName, messageText, chatId, isGr
             body  = rawBody?.length > 80 ? rawBody.substring(0, 77) + '...' : (rawBody || '📎 Attachment');
         }
 
-        // 1. Call server /send-push → delivers to CLOSED browsers via Web Push
-        // Receiver subscription Firestore నుండి client side చదివి pass చేస్తున్నాం
-        // — server Firestore read చేయకుండా quota save అవుతుంది
-        (async () => {
-            try {
-                let subscription = null;
-                if (db) {
-                    const subsSnap = await db.collection('users').doc(toUID)
-                        .collection('pushSubscriptions').get();
-                    if (!subsSnap.empty) {
-                        const sub = subsSnap.docs[0].data();
-                        subscription = { endpoint: sub.endpoint, keys: sub.keys };
-                    }
-                }
-                fetch('/send-push', {
-                    method:  'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({
-                        uid:     toUID,
-                        title,
-                        body,
-                        icon:    '/icon-192.png',
-                        chatId:  chatId  || null,
-                        isGroup: isGroup || false,
-                        type:    notifType,
-                        subscription
-                    })
-                }).catch(() => {});
-            } catch(e) {}
-        })();
+        // Receiver subscription client side చదివి server కి pass చేయడం
+        // Server Firestore read చేయదు — quota save అవుతుంది
+        let subscription = null;
+        try {
+            const subsSnap = await db.collection('users').doc(toUID)
+                .collection('pushSubscriptions').get();
+            if (!subsSnap.empty) {
+                const sub = subsSnap.docs[0].data();
+                subscription = { endpoint: sub.endpoint, keys: sub.keys };
+            }
+        } catch(e) {}
 
-        // 2. Write to Firestore — SW Firestore listener picks this up (browser open/minimised)
-        await db.collection('notifications')
-            .doc(toUID)
-            .collection('pending')
-            .add({
+        fetch('/send-push', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+                uid:     toUID,
                 title,
                 body,
-                icon:      '/icon-192.png',
-                chatId:    chatId  || null,
-                isGroup:   isGroup || false,
-                type:      notifType,
-                fromUID:   window.currentUser?.uid || null,
-                createdAt: new Date(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
+                icon:    '/icon-192.png',
+                chatId:  chatId  || null,
+                isGroup: isGroup || false,
+                type:    notifType,
+                subscription
+            })
+        }).catch(() => {});
 
     } catch (err) {
         console.error('sendPushNotification error:', err);
