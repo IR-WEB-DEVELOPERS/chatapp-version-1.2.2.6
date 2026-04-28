@@ -15,27 +15,9 @@ async function loadFriendsList() {
 
         const friendsFromArray = currentUserData.friends || [];
 
-        // FIX: friends array లో లేకపోయినా messages exist అయిన contacts ని కూడా show చేయాలి
-        // messages collection లో participants గా ఉన్న UIDs fetch చేయాలి
-        let extraUIDs = [];
-        try {
-            const msgSnap = await db.collection('messages')
-                .where('participants', 'array-contains', currentUser.uid)
-                .limit(100)
-                .get();
-            const seen = new Set(friendsFromArray);
-            msgSnap.forEach(doc => {
-                const parts = doc.data().participants || [];
-                parts.forEach(uid => {
-                    if (uid !== currentUser.uid && !seen.has(uid)) {
-                        seen.add(uid);
-                        extraUIDs.push(uid);
-                    }
-                });
-            });
-        } catch (e) { console.log('Extra UIDs fetch error:', e); }
-
-        const friends = [...friendsFromArray, ...extraUIDs].filter(uid => {
+        // participants query తీసేశాం — చాలా reads waste అవుతున్నాయి
+        // friends array మాత్రమే చూస్తాం
+        const friends = [...friendsFromArray].filter(uid => {
             if (window.privateChatsManager?.isPrivate(uid)) return false;
             if (window.privateChatsManager?.isBlocked(uid)) return false;
             return true;
@@ -61,28 +43,15 @@ async function loadFriendsList() {
             let lastTimeStr    = '';
 
             try {
-                let snap;
-                try {
-                    snap = await db.collection('messages')
-                        .where('chatId', '==', chatId)
-                        .orderBy('time', 'desc')
-                        .limit(1)
-                        .get();
-                } catch {
-                    const allSnap = await db.collection('messages').where('chatId', '==', chatId).get();
-                    const docs    = allSnap.docs.sort((a, b) => {
-                        const ta = a.data().time?.toDate?.() || new Date(a.data().time);
-                        const tb = b.data().time?.toDate?.() || new Date(b.data().time);
-                        return tb - ta;
-                    });
-                    snap = { empty: docs.length === 0, docs };
-                }
+                // Cache నుండి last message చదువు — Firestore read అక్కర్లేదు
+                const cached = window.hybridCache?.getMessages(chatId);
+                const msgs = cached && cached.length > 0 ? cached : [];
+                const msgData = msgs.length > 0 ? msgs[msgs.length - 1] : null;
 
-                if (!snap.empty) {
-                    const msgData = snap.docs[0].data();
-                    const t       = msgData.time;
-                    const tDate   = t?.toDate ? t.toDate() : new Date(t);
-                    lastTime      = tDate.getTime();
+                if (msgData) {
+                    const t     = msgData.time;
+                    const tDate = t?.toDate ? t.toDate() : new Date(t);
+                    lastTime    = tDate.getTime();
 
                     const now       = new Date();
                     const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
